@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sched.h>
+#include <signal.h>
 
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
 # include <crt_externs.h>
@@ -391,6 +392,8 @@ int uv_spawn(uv_loop_t* loop,
   int exec_errorno;
   int i;
   int status;
+  sigset_t sigset;
+  sigset_t sigoset;
 
   if (options->cpumask != NULL) {
 #if defined(__linux__) || defined(__FreeBSD__)
@@ -463,8 +466,12 @@ int uv_spawn(uv_loop_t* loop,
 
   uv_signal_start(&loop->child_watcher, uv__chld, SIGCHLD);
 
+  sigfillset(&sigset);
+  sigprocmask(SIG_SETMASK, &sigset, &sigoset);
+
   /* Acquire write lock to prevent opening new fds in worker threads */
   uv_rwlock_wrlock(&loop->cloexec_lock);
+
   pid = fork();
 
   if (pid == -1) {
@@ -476,6 +483,7 @@ int uv_spawn(uv_loop_t* loop,
   }
 
   if (pid == 0) {
+    sigprocmask(SIG_SETMASK, &sigoset, NULL);
     uv__process_child_init(options, stdio_count, pipes, signal_pipe[1]);
     abort();
   }
@@ -529,7 +537,7 @@ int uv_spawn(uv_loop_t* loop,
 
   if (pipes != pipes_storage)
     uv__free(pipes);
-
+  sigprocmask(SIG_SETMASK, &sigoset, NULL);
   return exec_errorno;
 
 error:
@@ -547,6 +555,8 @@ error:
     if (pipes != pipes_storage)
       uv__free(pipes);
   }
+
+  sigprocmask(SIG_SETMASK, &sigoset, NULL);
 
   return err;
 #endif
