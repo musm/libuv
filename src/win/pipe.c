@@ -2286,7 +2286,7 @@ int uv_pipe_open(uv_pipe_t* pipe, uv_os_fd_t os_handle) {
   if (pipe->ipc) {
     assert(!(pipe->flags & UV_HANDLE_NON_OVERLAPPED_PIPE));
     pipe->pipe.conn.ipc_remote_pid = uv_os_getppid();
-    assert(pipe->pipe.conn.ipc_remote_pid != (DWORD) -1);
+    assert(pipe->pipe.conn.ipc_remote_pid != (DWORD)(uv_pid_t) -1);
   }
   return 0;
 }
