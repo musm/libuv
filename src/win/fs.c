@@ -1611,20 +1611,131 @@ static void fs__access(uv_fs_t* req) {
   }
 
   /*
-   * Access is possible if
-   * - write access wasn't requested,
-   * - or the file isn't read-only,
-   * - or it's a directory.
-   * (Directories cannot be read-only on Windows.)
+   * If write access was requested, ensure that either
+   * the requested file is not marked as READONLY,
+   * or that it's actually a directory (directories
+   * cannot be read-only in Windows)
    */
-  if (!(req->fs.info.mode & W_OK) ||
-      !(attr & FILE_ATTRIBUTE_READONLY) ||
-      (attr & FILE_ATTRIBUTE_DIRECTORY)) {
-    SET_REQ_RESULT(req, 0);
-  } else {
+  if ((req->fs.info.mode & W_OK) &&
+      ((attr & FILE_ATTRIBUTE_READONLY) ||
+       !(attr & FILE_ATTRIBUTE_DIRECTORY))) {
     SET_REQ_WIN32_ERROR(req, UV_EPERM);
+    return;
   }
 
+  /*
+   * If executable access was requested, we must check
+   * with the AccessCheck() ACL call.  This is mildly
+   * expensive, so only do it if `X_OK` was requested.
+   */
+  if (req->fs.info.mode & X_OK) {
+    /*
+     * First, we must allocate enough space. We do that
+     * by first passing in a zero-length null pointer,
+     * storing the desired length into `sd_length`.
+     * We expect this call to fail with a certain error code.
+     */
+    DWORD sdLen = 0;
+    SECURITY_INFORMATION si = OWNER_SECURITY_INFORMATION |
+                              GROUP_SECURITY_INFORMATION |
+                              DACL_SECURITY_INFORMATION;
+    if (GetFileSecurityW(req->file.pathw, si, NULL, 0, &sdLen)) {
+      SET_REQ_RESULT(req, UV_UNKNOWN);
+      return;
+    }
+    DWORD err = GetLastError();
+    if (ERROR_INSUFFICIENT_BUFFER != err) {
+      SET_REQ_WIN32_ERROR(req, err);
+      return;
+    }
+
+    /* Now that we know how big `sd` must be, allocate it */
+    PSECURITY_DESCRIPTOR sd = (PSECURITY_DESCRIPTOR)uv__malloc(sdLen);
+    if (!sd) {
+      uv_fatal_error(ERROR_OUTOFMEMORY, "uv__malloc");
+    }
+
+    /* Call `GetFileSecurity()` with the requisite `sd` structure. */
+    if (!GetFileSecurityW(req->file.pathw, si, sd, sdLen, &sdLen)) {
+      SET_REQ_WIN32_ERROR(req, GetLastError());
+      goto accesscheck_cleanup;
+    }
+
+    /*
+     * Next we need to create an impersonation token representing
+     * the current user and the current process.
+     */
+    HANDLE hToken = NULL;
+    DWORD tokenAccess = TOKEN_IMPERSONATE |
+                        TOKEN_QUERY |
+                        TOKEN_DUPLICATE |
+                        STANDARD_RIGHTS_READ;
+    if (!OpenProcessToken(GetCurrentProcess(), tokenAccess, &hToken )) {
+      SET_REQ_WIN32_ERROR(req, GetLastError());
+      goto accesscheck_cleanup;
+    }
+    HANDLE hImpersonatedToken = NULL;
+    if (!DuplicateToken(hToken, SecurityImpersonation, &hImpersonatedToken)) {
+      SET_REQ_WIN32_ERROR(req, GetLastError());
+      goto accesscheck_cleanup;
+    }
+
+    /*
+     * Next, construct a mapping from generic access rights to
+     * the more specific access rights that AccessCheck expects.
+     */
+    DWORD executeAccessRights = FILE_GENERIC_EXECUTE;
+    GENERIC_MAPPING mapping = { 0xFFFFFFFF };
+    mapping.GenericExecute = FILE_GENERIC_EXECUTE;
+    MapGenericMask(&executeAccessRights, &mapping);
+
+    PRIVILEGE_SET privileges = { 0 };
+    DWORD grantedAccess = 0, privilegesLen = sizeof(privileges);
+    BOOL result = FALSE;
+    if (AccessCheck(sd,
+                    hImpersonatedToken,
+                    executeAccessRights,
+                    &mapping,
+                    &privileges,
+                    &privilegesLen,
+                    &grantedAccess,
+                    &result)) {
+      /*
+       * If AccessCheck passes, nothing went wrong, but
+       * we must still check that we have access.
+       */
+      if (!result) {
+        SET_REQ_WIN32_ERROR(req, UV_EPERM);
+        goto accesscheck_cleanup;
+      }
+    } else {
+      /*
+       * This signifies that something went wrong with the
+       * actual AccessCheck() invocation itself.
+       */
+      SET_REQ_WIN32_ERROR(req, GetLastError());
+      goto accesscheck_cleanup;
+    }
+
+accesscheck_cleanup:
+    uv__free(sd);
+    if (hImpersonatedToken != NULL) {
+      CloseHandle(hImpersonatedToken);
+    }
+    if (hToken != NULL) {
+      CloseHandle(hToken);
+    }
+    /*
+     * If the result is false, return immediately.
+     * Some error code has been set in the `req` already.
+     */
+    if (!result) {
+      return;
+    }
+  }
+
+  /* If we get to the end, everything worked out. */
+  SET_REQ_SUCCESS(req);
 }
 
 
