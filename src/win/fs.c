@@ -687,7 +687,7 @@ void fs__read(uv_fs_t* req) {
 
 
 void fs__write(uv_fs_t* req) {
-  HANDLE handle = req->file.hFile;;
+  HANDLE handle = req->file.hFile;
   int64_t offset = req->fs.info.offset;
   OVERLAPPED overlapped, *overlapped_ptr;
   LARGE_INTEGER offset_;
@@ -1631,28 +1631,36 @@ static void fs__access(uv_fs_t* req) {
    * expensive, so only do it if `X_OK` was requested.
    */
   if (req->fs.info.mode & X_OK) {
+    DWORD sdLen = 0, err = 0, tokenAccess = 0, executeAccessRights = 0,
+          grantedAccess = 0, privilegesLen = 0;
+    SECURITY_INFORMATION si = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    HANDLE hToken = NULL, hImpersonatedToken = NULL;
+    GENERIC_MAPPING mapping = { 0xFFFFFFFF };
+    PRIVILEGE_SET privileges = { 0 };
+    BOOL result = FALSE;
+
     /*
      * First, we must allocate enough space. We do that
      * by first passing in a zero-length null pointer,
      * storing the desired length into `sd_length`.
      * We expect this call to fail with a certain error code.
      */
-    DWORD sdLen = 0;
-    SECURITY_INFORMATION si = OWNER_SECURITY_INFORMATION |
-                              GROUP_SECURITY_INFORMATION |
-                              DACL_SECURITY_INFORMATION;
+     si = OWNER_SECURITY_INFORMATION |
+          GROUP_SECURITY_INFORMATION |
+          DACL_SECURITY_INFORMATION;
     if (GetFileSecurityW(req->file.pathw, si, NULL, 0, &sdLen)) {
       SET_REQ_RESULT(req, UV_UNKNOWN);
       return;
     }
-    DWORD err = GetLastError();
+    err = GetLastError();
     if (ERROR_INSUFFICIENT_BUFFER != err) {
       SET_REQ_WIN32_ERROR(req, err);
       return;
     }
 
     /* Now that we know how big `sd` must be, allocate it */
-    PSECURITY_DESCRIPTOR sd = (PSECURITY_DESCRIPTOR)uv__malloc(sdLen);
+    sd = (PSECURITY_DESCRIPTOR)uv__malloc(sdLen);
     if (!sd) {
       uv_fatal_error(ERROR_OUTOFMEMORY, "uv__malloc");
     }
@@ -1667,16 +1675,14 @@ static void fs__access(uv_fs_t* req) {
      * Next we need to create an impersonation token representing
      * the current user and the current process.
      */
-    HANDLE hToken = NULL;
-    DWORD tokenAccess = TOKEN_IMPERSONATE |
-                        TOKEN_QUERY |
-                        TOKEN_DUPLICATE |
-                        STANDARD_RIGHTS_READ;
+    tokenAccess = TOKEN_IMPERSONATE |
+                  TOKEN_QUERY |
+                  TOKEN_DUPLICATE |
+                  STANDARD_RIGHTS_READ;
     if (!OpenProcessToken(GetCurrentProcess(), tokenAccess, &hToken )) {
       SET_REQ_WIN32_ERROR(req, GetLastError());
       goto accesscheck_cleanup;
     }
-    HANDLE hImpersonatedToken = NULL;
     if (!DuplicateToken(hToken, SecurityImpersonation, &hImpersonatedToken)) {
       SET_REQ_WIN32_ERROR(req, GetLastError());
       goto accesscheck_cleanup;
@@ -1686,14 +1692,12 @@ static void fs__access(uv_fs_t* req) {
      * Next, construct a mapping from generic access rights to
      * the more specific access rights that AccessCheck expects.
      */
-    DWORD executeAccessRights = FILE_GENERIC_EXECUTE;
-    GENERIC_MAPPING mapping = { 0xFFFFFFFF };
+    executeAccessRights = FILE_GENERIC_EXECUTE;
     mapping.GenericExecute = FILE_GENERIC_EXECUTE;
     MapGenericMask(&executeAccessRights, &mapping);
 
-    PRIVILEGE_SET privileges = { 0 };
-    DWORD grantedAccess = 0, privilegesLen = sizeof(privileges);
-    BOOL result = FALSE;
+    privilegesLen = sizeof(privileges);
+    result = FALSE;
     if (AccessCheck(sd,
                     hImpersonatedToken,
                     executeAccessRights,
@@ -1779,6 +1783,12 @@ static void fs__chmod(uv_fs_t* req) {
        psidNull = NULL, psidCreatorGroup = NULL;
   PSECURITY_DESCRIPTOR pSD = NULL;
   PEXPLICIT_ACCESS_W ea = NULL, poldEAs = NULL;
+  SECURITY_INFORMATION si = NULL;
+  DWORD numGroups = 0, tokenAccess = 0, u_mode = 0, g_mode = 0, o_mode = 0,
+        u_deny_mode = 0, g_deny_mode = 0;
+  HANDLE hToken = NULL, hImpersonatedToken = NULL;
+  ULONG numOldEAs = 0, numNewEAs = 0, numOtherGroups = 0,
+        ea_idx = 0, ea_write_idx = 0;
 
   /* Create well-known SIDs for various global groups */
   SID_IDENTIFIER_AUTHORITY SIDAuthWorld = SECURITY_WORLD_SID_AUTHORITY;
@@ -1798,9 +1808,8 @@ static void fs__chmod(uv_fs_t* req) {
   }
 
   /* Get the old DACL so that we can merge into it */
-  SECURITY_INFORMATION si = OWNER_SECURITY_INFORMATION |
-                            GROUP_SECURITY_INFORMATION |
-                            DACL_SECURITY_INFORMATION;
+  si = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+       DACL_SECURITY_INFORMATION;
   if (ERROR_SUCCESS != GetNamedSecurityInfoW(req->file.pathw, SE_FILE_OBJECT,
                                              si, &psidOwner, &psidGroup,
                                              &pOldDACL, NULL, &pSD)) {
@@ -1819,26 +1828,18 @@ static void fs__chmod(uv_fs_t* req) {
    * set the permissions for those groups to be the same as the "group" bit; so first
    * we collect a list of group PSIDs:
    */
-  DWORD numGroups = 0;
-  HANDLE hToken = NULL;
-  DWORD tokenAccess = TOKEN_IMPERSONATE |
-                      TOKEN_QUERY |
-                      TOKEN_DUPLICATE |
-                      STANDARD_RIGHTS_READ;
+  tokenAccess = TOKEN_IMPERSONATE | TOKEN_QUERY | TOKEN_DUPLICATE |
+                STANDARD_RIGHTS_READ;
   if (!OpenProcessToken(GetCurrentProcess(), tokenAccess, &hToken )) {
     SET_REQ_WIN32_ERROR(req, GetLastError());
     goto chmod_cleanup;
   }
-  HANDLE hImpersonatedToken = NULL;
   if (!DuplicateToken(hToken, SecurityImpersonation, &hImpersonatedToken)) {
     SET_REQ_WIN32_ERROR(req, GetLastError());
     goto chmod_cleanup;
   }
 
   /* Extract EAs from old DACL */
-  ULONG numOldEAs = 0;
-  ULONG numOtherGroups = 0;
-  ULONG ea_idx = 0;
   if (ERROR_SUCCESS != GetExplicitEntriesFromAclW(pOldDACL, &numOldEAs,
                                                   &poldEAs)) {
     SET_REQ_WIN32_ERROR(req, GetLastError());
@@ -1847,6 +1848,7 @@ static void fs__chmod(uv_fs_t* req) {
 
   /* Iterate over all old ACEs, looking for groups that we belong to */
   for (ea_idx=0; ea_idx<numOldEAs; ++ea_idx) {
+    BOOL isMember = FALSE;
     PSID pEASid = (PSID)poldEAs[ea_idx].Trustee.ptstrName;
     /* Skip this EA if it isn't an SID, or it is "Everyone" or our actual group */
     if (poldEAs[ea_idx].Trustee.TrusteeForm != TRUSTEE_IS_SID ||
@@ -1856,7 +1858,6 @@ static void fs__chmod(uv_fs_t* req) {
     }
 
     /* Check to see if our user is a member of this group */
-    BOOL isMember = FALSE;
     if (!CheckTokenMembership(hImpersonatedToken, pEASid, &isMember)) {
       SET_REQ_WIN32_ERROR(req, GetLastError());
       goto chmod_cleanup;
@@ -1869,11 +1870,11 @@ static void fs__chmod(uv_fs_t* req) {
   }
 
   /* Create an ACE for each triplet (user, group, other) */
-  int numEAs = 8 + 3*numOtherGroups;
-  ea = (PEXPLICIT_ACCESS_W) malloc(sizeof(EXPLICIT_ACCESS_W)*numEAs);
-  DWORD u_mode = ((req->fs.info.mode & S_IRWXU) >> 6);
-  DWORD g_mode = ((req->fs.info.mode & S_IRWXG) >> 3);
-  DWORD o_mode = ((req->fs.info.mode & S_IRWXO) >> 0);
+  numNewEAs = 8 + 3*numOtherGroups;
+  ea = (PEXPLICIT_ACCESS_W) malloc(sizeof(EXPLICIT_ACCESS_W)*numNewEAs);
+  u_mode = ((req->fs.info.mode & S_IRWXU) >> 6);
+  g_mode = ((req->fs.info.mode & S_IRWXG) >> 3);
+  o_mode = ((req->fs.info.mode & S_IRWXO) >> 0);
 
   /* We start by revoking previous permissions for trustees we care about */
   build_access_struct(&ea[0], psidOwner,    TRUSTEE_IS_USER,  0, REVOKE_ACCESS);
@@ -1884,8 +1885,8 @@ static void fs__chmod(uv_fs_t* req) {
    * We also add explicit denies to user and group if the user shouldn't have
    * a permission but the group or everyone can, for instance.
    */
-  DWORD u_deny_mode = (~u_mode) & (g_mode | o_mode);
-  DWORD g_deny_mode = (~g_mode) & o_mode;
+  u_deny_mode = (~u_mode) & (g_mode | o_mode);
+  g_deny_mode = (~g_mode) & o_mode;
   build_access_struct(&ea[3], psidOwner, TRUSTEE_IS_USER,  u_deny_mode, DENY_ACCESS);
   build_access_struct(&ea[4], psidGroup, TRUSTEE_IS_GROUP, g_deny_mode, DENY_ACCESS);
 
@@ -1898,8 +1899,9 @@ static void fs__chmod(uv_fs_t* req) {
    * Iterate over all old ACEs, looking for groups that we belong to, and setting
    * the appropriate access bits for those groups (as g_mode)
    */
-  ULONG ea_write_idx = 8;
+  ea_write_idx = 8;
   for (ea_idx=0; ea_idx<numOldEAs; ++ea_idx) {
+    BOOL isMember = FALSE;
     PSID pEASid = (PSID)poldEAs[ea_idx].Trustee.ptstrName;
     /* Skip this EA if it isn't an SID, or it is "Everyone" or our actual group */
     if (poldEAs[ea_idx].Trustee.TrusteeForm != TRUSTEE_IS_SID ||
@@ -1909,7 +1911,6 @@ static void fs__chmod(uv_fs_t* req) {
     }
 
     /* Check to see if our user is a member of this group */
-    BOOL isMember = FALSE;
     if (!CheckTokenMembership(hImpersonatedToken, pEASid, &isMember)) {
       SET_REQ_WIN32_ERROR(req, GetLastError());
       goto chmod_cleanup;
@@ -1920,7 +1921,7 @@ static void fs__chmod(uv_fs_t* req) {
      * the unlikely event that we have been added to a group since we first
      * calculated `numOtherGroups`.
      */
-    if (isMember && ea_write_idx < numEAs) {
+    if (isMember && ea_write_idx < numNewEAs) {
       build_access_struct(&ea[ea_write_idx], pEASid, TRUSTEE_IS_GROUP, 0, REVOKE_ACCESS);
       build_access_struct(&ea[ea_write_idx + 1], pEASid, TRUSTEE_IS_GROUP, g_deny_mode, DENY_ACCESS);
       build_access_struct(&ea[ea_write_idx + 2], pEASid, TRUSTEE_IS_GROUP, g_mode, SET_ACCESS);
@@ -1932,7 +1933,7 @@ static void fs__chmod(uv_fs_t* req) {
    * We next need to set all the "other group" entries for groups that already have
    * ACEs present and which contain our user.
    */
-  if (ERROR_SUCCESS != SetEntriesInAclW(numEAs, &ea[0], pOldDACL, &pNewDACL)) {
+  if (ERROR_SUCCESS != SetEntriesInAclW(numNewEAs, &ea[0], pOldDACL, &pNewDACL)) {
     SET_REQ_WIN32_ERROR(req, GetLastError());
     goto chmod_cleanup;
   }
