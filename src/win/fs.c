@@ -1785,7 +1785,7 @@ static void fs__chmod(uv_fs_t* req) {
   PEXPLICIT_ACCESS_W ea = NULL, poldEAs = NULL;
   SECURITY_INFORMATION si = NULL;
   DWORD numGroups = 0, tokenAccess = 0, u_mode = 0, g_mode = 0, o_mode = 0,
-        u_deny_mode = 0, g_deny_mode = 0;
+        u_deny_mode = 0, g_deny_mode = 0, attr = 0, new_attr = 0;
   HANDLE hToken = NULL, hImpersonatedToken = NULL;
   ULONG numOldEAs = 0, numNewEAs = 0, numOtherGroups = 0,
         ea_idx = 0, ea_write_idx = 0;
@@ -1945,6 +1945,31 @@ static void fs__chmod(uv_fs_t* req) {
               NULL, NULL, pNewDACL, NULL)) {
     SET_REQ_WIN32_ERROR(req, GetLastError());
     goto chmod_cleanup;
+  }
+
+  /* Finally, if none of the write bits are set, mark the file as read-only.
+   * Alternatively, if it was marked as read-only, unmark it if we have at least
+   * one writable group set. */
+  attr = GetFileAttributesW(req->file.pathw);
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    SET_REQ_WIN32_ERROR(req, GetLastError());
+    goto chmod_cleanup;
+  }
+  new_attr = attr;
+  /* Test if write bits are off, but file is not read-only */
+  if ((req->fs.info.mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0 && (attr & FILE_ATTRIBUTE_READONLY) == 0) {
+    new_attr |= FILE_ATTRIBUTE_READONLY;
+  }
+  /* Test if write bits are on, but file is read-only */
+  if ((req->fs.info.mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0 && (attr & FILE_ATTRIBUTE_READONLY) != 0) {
+    new_attr &= ~FILE_ATTRIBUTE_READONLY;
+  }
+  /* Set the new file attributes if they've changed */
+  if (new_attr != attr) {
+    if (!SetFileAttributesW(req->file.pathw, new_attr)) {
+      SET_REQ_WIN32_ERROR(req, GetLastError());
+      goto chmod_cleanup;
+    }
   }
 
   SET_REQ_SUCCESS(req);
