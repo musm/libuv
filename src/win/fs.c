@@ -1759,7 +1759,7 @@ static void build_access_struct(EXPLICIT_ACCESS_W* ea, PSID owner,
    * things up.
    */
   ea->grfAccessPermissions = 0;
-  ea->grfInheritance = NO_INHERITANCE;
+  ea->grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
   ea->Trustee.MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
   ea->Trustee.TrusteeForm = TRUSTEE_IS_SID;
   ea->Trustee.TrusteeType = user_type;
@@ -1929,25 +1929,13 @@ static void fs__chmod(uv_fs_t* req) {
     }
   }
 
-  /*
-   * We next need to set all the "other group" entries for groups that already have
-   * ACEs present and which contain our user.
-   */
+  /* Set entries in the ACL object */
   if (ERROR_SUCCESS != SetEntriesInAclW(numNewEAs, &ea[0], pOldDACL, &pNewDACL)) {
     SET_REQ_WIN32_ERROR(req, GetLastError());
     goto chmod_cleanup;
   }
 
-  if (ERROR_SUCCESS != SetNamedSecurityInfoW(
-              req->file.pathw,
-              SE_FILE_OBJECT,
-              DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-              NULL, NULL, pNewDACL, NULL)) {
-    SET_REQ_WIN32_ERROR(req, GetLastError());
-    goto chmod_cleanup;
-  }
-
-  /* Finally, if none of the write bits are set, mark the file as read-only.
+  /* If none of the write bits are set, we want to mark the file as read-only.
    * Alternatively, if it was marked as read-only, unmark it if we have at least
    * one writable group set. */
   attr = GetFileAttributesW(req->file.pathw);
@@ -1956,16 +1944,36 @@ static void fs__chmod(uv_fs_t* req) {
     goto chmod_cleanup;
   }
   new_attr = attr;
-  /* Test if write bits are off, but file is not read-only */
-  if ((req->fs.info.mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0 && (attr & FILE_ATTRIBUTE_READONLY) == 0) {
+  if ((req->fs.info.mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0) {
     new_attr |= FILE_ATTRIBUTE_READONLY;
   }
-  /* Test if write bits are on, but file is read-only */
-  if ((req->fs.info.mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0 && (attr & FILE_ATTRIBUTE_READONLY) != 0) {
+  if ((req->fs.info.mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0) {
     new_attr &= ~FILE_ATTRIBUTE_READONLY;
   }
-  /* Set the new file attributes if they've changed */
-  if (new_attr != attr) {
+
+  /*
+   * Now we actually do the setting.  We only call SetFileAttributes() if the
+   * attributes have actually changed, but also note that if we are setting
+   * something to be read-only we want to do it _before_ adjusting the ACL,
+   * (as we won't have permissions to adjust these attributes afterward)
+   * and if we're setting it to not be read-only, we want to do it _after_
+   * adjusting the ACL (as we may not have the permissions beforehand).
+   */
+  if (new_attr != attr && (new_attr & FILE_ATTRIBUTE_READONLY) != 0) {
+    if (!SetFileAttributesW(req->file.pathw, new_attr)) {
+      SET_REQ_WIN32_ERROR(req, GetLastError());
+      goto chmod_cleanup;
+    }
+  }
+  if (ERROR_SUCCESS != SetNamedSecurityInfoW(
+              req->file.pathw,
+              SE_FILE_OBJECT,
+              DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+              NULL, NULL, pNewDACL, NULL)) {
+    SET_REQ_WIN32_ERROR(req, GetLastError());
+    goto chmod_cleanup;
+  }
+  if (new_attr != attr && (new_attr & FILE_ATTRIBUTE_READONLY) == 0) {
     if (!SetFileAttributesW(req->file.pathw, new_attr)) {
       SET_REQ_WIN32_ERROR(req, GetLastError());
       goto chmod_cleanup;
