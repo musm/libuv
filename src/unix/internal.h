@@ -56,6 +56,12 @@
 # include <AvailabilityMacros.h>
 #endif
 
+#if defined(PATH_MAX)
+# define UV__PATH_MAX PATH_MAX
+#else
+# define UV__PATH_MAX 8192
+#endif
+
 #if defined(__ANDROID__)
 int uv__pthread_sigmask(int how, const sigset_t* set, sigset_t* oset);
 # ifdef pthread_sigmask
