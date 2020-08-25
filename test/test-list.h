@@ -474,6 +474,9 @@ TEST_DECLARE   (ip6_addr_link_local)
 
 TEST_DECLARE   (poll_close_doesnt_corrupt_stack)
 TEST_DECLARE   (poll_closesocket)
+TEST_DECLARE   (close_fd)
+TEST_DECLARE   (closed_fd_events)
+TEST_DECLARE   (spawn_fs_open)
 #ifdef _WIN32
 TEST_DECLARE   (spawn_detect_pipe_name_collisions_on_windows)
 #if !defined(USING_UV_SHARED)
@@ -488,8 +491,6 @@ TEST_DECLARE   (ipc_listen_after_bind_twice)
 TEST_DECLARE   (win32_signum_number)
 #else
 TEST_DECLARE   (emfile)
-TEST_DECLARE   (close_fd)
-TEST_DECLARE   (spawn_fs_open)
 TEST_DECLARE   (spawn_setuid_setgid)
 TEST_DECLARE   (we_get_signal)
 TEST_DECLARE   (we_get_signals)
@@ -498,7 +499,6 @@ TEST_DECLARE   (we_get_signals_mixed)
 TEST_DECLARE   (signal_multiple_loops)
 TEST_DECLARE   (signal_pending_on_close)
 TEST_DECLARE   (signal_close_loop_alive)
-TEST_DECLARE   (closed_fd_events)
 #endif
 #ifdef __APPLE__
 TEST_DECLARE   (osx_select)
@@ -588,7 +588,8 @@ TASK_LIST_START
 #ifndef _WIN32
   TEST_ENTRY  (pipe_close_stdout_read_stdin)
 #endif
-  TEST_ENTRY  (pipe_set_non_blocking)
+  /* Seems to be either about 0.5s or 5s, depending on the OS. */
+  TEST_ENTRY_CUSTOM (pipe_set_non_blocking, 0, 0, 20000)
   TEST_ENTRY  (pipe_set_chmod)
   TEST_ENTRY  (tty)
 #ifdef _WIN32
@@ -965,6 +966,9 @@ TASK_LIST_START
 
   TEST_ENTRY  (poll_close_doesnt_corrupt_stack)
   TEST_ENTRY  (poll_closesocket)
+  TEST_ENTRY  (close_fd)
+  TEST_ENTRY  (closed_fd_events)
+  TEST_ENTRY  (spawn_fs_open)
 #ifdef _WIN32
   TEST_ENTRY  (spawn_detect_pipe_name_collisions_on_windows)
 #if !defined(USING_UV_SHARED)
@@ -979,8 +983,6 @@ TASK_LIST_START
   TEST_ENTRY  (win32_signum_number)
 #else
   TEST_ENTRY  (emfile)
-  TEST_ENTRY  (close_fd)
-  TEST_ENTRY  (spawn_fs_open)
   TEST_ENTRY  (spawn_setuid_setgid)
   TEST_ENTRY  (we_get_signal)
   TEST_ENTRY  (we_get_signals)
@@ -989,7 +991,6 @@ TASK_LIST_START
   TEST_ENTRY  (signal_multiple_loops)
   TEST_ENTRY  (signal_pending_on_close)
   TEST_ENTRY  (signal_close_loop_alive)
-  TEST_ENTRY  (closed_fd_events)
 #endif
 
 #ifdef __APPLE__
