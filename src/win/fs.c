@@ -1215,12 +1215,12 @@ void fs__unlink(uv_fs_t* req) {
 
 void fs__mkdir(uv_fs_t* req) {
   /* TODO: use req->mode. */
-  req->result = _wmkdir(req->file.pathw);
-  if (req->result == -1) {
-    req->sys_errno_ = _doserrno;
-    req->result = req->sys_errno_ == ERROR_INVALID_NAME
-                ? UV_EINVAL
-                : uv_translate_sys_error(req->sys_errno_);
+  if (CreateDirectoryW(req->file.pathw, NULL)) {
+    SET_REQ_RESULT(req, 0);
+  } else {
+    SET_REQ_WIN32_ERROR(req, GetLastError());
+    if (req->sys_errno_ == ERROR_INVALID_NAME)
+      req->result = UV_EINVAL;
   }
 }
 
@@ -1237,7 +1237,7 @@ void fs__mktemp(uv_fs_t* req, uv__fs_mktemp_func func) {
   size_t len;
   uint64_t v;
   char* path;
-
+  
   path = req->path;
   len = wcslen(req->file.pathw);
   ep = req->file.pathw + len;
@@ -1276,11 +1276,14 @@ clobber:
 
 
 static int fs__mkdtemp_func(uv_fs_t* req) {
-  if (_wmkdir(req->file.pathw) == 0) {
+  DWORD error;
+  if (CreateDirectoryW(req->file.pathw, NULL)) {
     SET_REQ_RESULT(req, 0);
     return 1;
-  } else if (errno != EEXIST) {
-    SET_REQ_RESULT(req, -1);
+  }
+  error = GetLastError();
+  if (error != ERROR_ALREADY_EXISTS) {
+    SET_REQ_WIN32_ERROR(req, error);
     return 1;
   }
 
